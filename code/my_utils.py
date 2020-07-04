@@ -42,7 +42,7 @@ def show_fashion_mnist(images, labels):
     展示给定的图片及对应的label。
     """
     use_svg_display()
-    _, figs = plt.subplots(1, len(images), figsize=(12, 12))
+    _, figs = plt.subplots(1, len(images), figsize=(10, 10))
     # 一张img和对应的lbl填充一个fig
     for f, img, lbl in zip(figs, images, labels):
         f.imshow(img.view((28, 28)).numpy())
