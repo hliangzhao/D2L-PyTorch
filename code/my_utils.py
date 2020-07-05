@@ -95,6 +95,16 @@ def evaluate_accuracy(data_iter, net):
     return acc_sum / n
 
 
+class FlattenLayer(torch.nn.Module):
+    """
+    将输入的各特征平铺成向量。
+    """
+    def __init__(self):
+        super(FlattenLayer, self).__init__()
+    def forward(self, x):
+        return x.view(x.shape[0], -1)
+
+
 def general_train(net, train_iter, test_iter, loss, num_epochs, batch_size, params=None, lr=None, optimizer=None):
     """
     本方法对大多数模型适用，因此写成通用的形式。
@@ -114,13 +124,13 @@ def general_train(net, train_iter, test_iter, loss, num_epochs, batch_size, para
             # 计算梯度并根据MGD更新参数
             l.backward()
             if optimizer is None:
-                my_utils.mgd(params, lr, batch_size)
+                mgd(params, lr, batch_size)
             else:
                 optimizer.step()
             
             train_l_sum += l.item()
             train_acc_sum += (y_hat.argmax(dim=1) == y).float().sum().item()
             n += y.shape[0]
-        test_acc = my_utils.evaluate_accuracy(test_iter, net)
+        test_acc = evaluate_accuracy(test_iter, net)
         print('epoch %d, loss %.4f, train acc %.3f, test acc %.3f'
               % (epoch + 1, train_l_sum / n, train_acc_sum / n, test_acc))
