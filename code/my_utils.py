@@ -98,15 +98,36 @@ def load_fashion_mnist(batch_size):
     return train_iter, test_iter
 
 
+# below code is only suitable for .ipynb before 03-7
+# def evaluate_accuracy(data_iter, net):
+#     """
+#     计算mini-batch数据上给定的模型的正确率。
+#     """
+#     acc_sum, n = 0., 0
+#     for X, y in data_iter:
+#         acc_sum += (net(X).argmax(dim=1) == y).float().sum().item()
+#         n += y.shape[0]
+#     return acc_sum / n
 def evaluate_accuracy(data_iter, net):
     """
-    计算mini-batch数据上给定的模型的正确率。
+    计算mini-batch数据上给定的模型的正确率（针对带有dropout的模型进行适配）。
     """
-    acc_sum, n = 0., 0
+    acc_sum, n = 0.0, 0
     for X, y in data_iter:
-        acc_sum += (net(X).argmax(dim=1) == y).float().sum().item()
-        n += y.shape[0]
-    return acc_sum / n
+        if isinstance(net, torch.nn.Module):
+            # 如果模型是通过torch来定义的（必然是nn.Module），
+            # 则torch会根据net当前是处于评估模式（eval）还是训练模式（train）来进行抉择是否dropout
+            # 评估模型自然要进入eval模式，但是别忘了评估结束后切换回来
+            net.eval()
+            acc_sum += (net(X).argmax(dim=1) == y).float().sum().item()
+            net.train()
+        else:
+            # 模型时从零开始实现的
+            if('is_training' in net.__code__.co_varnames):
+                # 若模型使用了dropout，则要将is_training设置为false
+                acc_sum += (net(X, is_training=False).argmax(dim=1) == y).float().sum().item()
+            else:
+                acc_sum += (net(X).argmax(dim=1) == y).float().sum().item()
 
 
 class FlattenLayer(torch.nn.Module):
