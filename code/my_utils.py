@@ -28,6 +28,20 @@ def mgd(params, lr, batch_size):
         param.data -= lr * param.grad / batch_size
 
 
+def linreg(X, w, b):
+    """
+    定义线性回归模型。
+    """
+    return torch.mm(X, w) + b
+
+
+def squared_loss(y_hat, y):
+    """
+    定义均方误差损失函数。
+    """
+    return (y_hat - y.view(y_hat.size())) ** 2 / 2
+
+
 def get_fashion_mnist_labels(labels):
     """
     根据数字获得对应的字符串label。
