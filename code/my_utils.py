@@ -1,7 +1,10 @@
 from IPython import display
 from matplotlib import pyplot as plt
 import torch
+import time
 import torchvision
+from torch import nn, optim
+import torch.nn.functional as F
 import torchvision.transforms as transforms
 
 
@@ -272,3 +275,12 @@ def corr2d(X, K):
     return Y
 
 
+class GlobalAvgPool2d(nn.Module):
+    """
+    全局平均池化层可通过将池化窗口形状设置成输入的高和宽实现。
+    """
+    def __init__(self):
+        super(GlobalAvgPool2d, self).__init__()
+    def forward(self, x):
+        # 将单个通道上（宽 * 高个元素的平均值计算出来）
+        return F.avg_pool2d(x, kernel_size=x.size()[2:])
