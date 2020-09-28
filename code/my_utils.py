@@ -98,36 +98,80 @@ def load_fashion_mnist(batch_size):
     return train_iter, test_iter
 
 
+def load_data_fashion_mnist(batch_size, resize=None, root='../data'):
+    """
+    将fashion-MNIST数据集导入变量train_iter和test_iter。和上面的代码相比增加了resize的选项。
+    """
+    trans = []
+    if resize:
+        trans.append(torchvision.transforms.Resize(size=resize))
+    trans.append(torchvision.transforms.ToTensor())
+
+    transform = torchvision.transforms.Compose(trans)
+    mnist_train = torchvision.datasets.FashionMNIST(root=root, train=True, download=True, transform=transform)
+    mnist_test = torchvision.datasets.FashionMNIST(root=root, train=False, download=True, transform=transform)
+
+    train_iter = torch.utils.data.DataLoader(mnist_train, batch_size=batch_size, shuffle=True, num_workers=4)
+    test_iter = torch.utils.data.DataLoader(mnist_test, batch_size=batch_size, shuffle=False, num_workers=4)
+
+    return train_iter, test_iter
+
+
 # below code is only suitable for .ipynb before 03-7
 # def evaluate_accuracy(data_iter, net):
 #     """
 #     计算mini-batch数据上给定的模型的正确率。
 #     """
-#     acc_sum, n = 0., 0
+#     acc_sum, n = 0.0, 0
 #     for X, y in data_iter:
 #         acc_sum += (net(X).argmax(dim=1) == y).float().sum().item()
 #         n += y.shape[0]
 #     return acc_sum / n
-def evaluate_accuracy(data_iter, net):
-    """
-    计算mini-batch数据上给定的模型的正确率（针对带有dropout的模型进行适配）。
-    """
-    acc_sum, n = 0.0, 0
-    for X, y in data_iter:
-        if isinstance(net, torch.nn.Module):
-            # 如果模型是通过torch来定义的（必然是nn.Module），
-            # 则torch会根据net当前是处于评估模式（eval）还是训练模式（train）来进行抉择是否dropout
-            # 评估模型自然要进入eval模式，但是别忘了评估结束后切换回来
-            net.eval()
-            acc_sum += (net(X).argmax(dim=1) == y).float().sum().item()
-            net.train()
-        else:
-            # 模型时从零开始实现的
-            if('is_training' in net.__code__.co_varnames):
-                # 若模型使用了dropout，则要将is_training设置为false
-                acc_sum += (net(X, is_training=False).argmax(dim=1) == y).float().sum().item()
-            else:
-                acc_sum += (net(X).argmax(dim=1) == y).float().sum().item()
+
+# below code is only suitable for .ipynb before 05-1
+# def evaluate_accuracy(data_iter, net):
+#     """
+#     计算mini-batch数据上给定的模型的正确率（针对带有dropout的模型进行适配）。
+#     """
+#     acc_sum, n = 0.0, 0
+#     for X, y in data_iter:
+#         if isinstance(net, torch.nn.Module):
+#             # 如果模型是通过torch来定义的（必然是nn.Module），
+#             # 则torch会根据net当前是处于评估模式（eval）还是训练模式（train）来进行抉择是否dropout
+#             # 评估模型自然要进入eval模式，但是别忘了评估结束后切换回来
+#             net.eval()
+#             acc_sum += (net(X).argmax(dim=1) == y).float().sum().item()
+#             net.train()
+#         else:
+#             # 模型时从零开始实现的
+#             if('is_training' in net.__code__.co_varnames):
+#                 # 若模型使用了dropout，则要将is_training设置为false
+#                 acc_sum += (net(X, is_training=False).argmax(dim=1) == y).float().sum().item()
+#             else:
+#                 acc_sum += (net(X).argmax(dim=1) == y).float().sum().item()
+#         n += y.shape[0]
+#     return acc_sum / n
+
+
+def evaluate_accuracy(data_iter, net, device=None):
+    if device is None and isinstance(net, nn.Module):
+        # 如果没指定device就使用net的device
+        device = list(net.parameters())[0].device
+    acc_sum, n = 0., 0
+    with torch.no_grad():
+        for X, y in data_iter:
+            if isinstance(net, nn.Module):
+                net.eval()
+                acc_sum += (net(X.to(device)).argmax(dim=1) == y.to(device)).float().sum().cpu().item()
+                net.train()
+            else: # 自定义的模型, 3.13节之后不会用到, 不考虑GPU
+                if('is_training' in net.__code__.co_varnames): # 如果有is_training这个参数
+                    # 将is_training设置成False
+                    acc_sum += (net(X, is_training=False).argmax(dim=1) == y).float().sum().item() 
+                else:
+                    acc_sum += (net(X).argmax(dim=1) == y).float().sum().item() 
+            n += y.shape[0]
+    return acc_sum / n
 
 
 class FlattenLayer(torch.nn.Module):
@@ -140,35 +184,65 @@ class FlattenLayer(torch.nn.Module):
         return x.view(x.shape[0], -1)
 
 
-def general_train(net, train_iter, test_iter, loss, num_epochs, batch_size, params=None, lr=None, optimizer=None):
+def general_train(net, train_iter, test_iter, loss, num_epochs, batch_size,
+              params=None, lr=None, optimizer=None):
     """
     本方法对大多数模型适用，因此写成通用的形式。
     本函数中同时实现了“从零开始实现”以及“借助torch”实现的训练代码。
     """
     for epoch in range(num_epochs):
-        train_l_sum, train_acc_sum, n = 0., 0., 0
+        train_l_sum, train_acc_sum, n = 0.0, 0.0, 0
         for X, y in train_iter:
             y_hat = net(X)
             l = loss(y_hat, y).sum()
+
             # 梯度清零
             if optimizer is not None:
                 optimizer.zero_grad()
             elif params is not None and params[0].grad is not None:
                 for param in params:
                     param.grad.data.zero_()
-            # 计算梯度并根据MGD更新参数
+
             l.backward()
             if optimizer is None:
                 mgd(params, lr, batch_size)
             else:
                 optimizer.step()
-            
+
+
             train_l_sum += l.item()
-            train_acc_sum += (y_hat.argmax(dim=1) == y).float().sum().item()
+            train_acc_sum += (y_hat.argmax(dim=1) == y).sum().item()
             n += y.shape[0]
         test_acc = evaluate_accuracy(test_iter, net)
         print('epoch %d, loss %.4f, train acc %.3f, test acc %.3f'
               % (epoch + 1, train_l_sum / n, train_acc_sum / n, test_acc))
+
+
+def train_cnn(net, train_iter, test_iter, batch_size, optimizer, device, num_epochs):
+    """
+    本函数给出了torch实现的网络的训练代码。
+    本函数允许训练在GPU上执行。
+    """
+    net = net.to(device)
+    print('training on', device)
+    loss = torch.nn.CrossEntropyLoss()
+    for epoch in range(num_epochs):
+        train_l_sum, train_acc_sum, n, batch_count, start = 0., 0., 0, 0, time.time()
+        for X, y in train_iter:
+            X = X.to(device)
+            y = y.to(device)
+            y_hat = net(X)
+            l = loss(y_hat, y)
+            optimizer.zero_grad()
+            l.backward()
+            optimizer.step()
+            train_l_sum += l.cpu().item()
+            train_acc_sum += (y_hat.argmax(dim=1) == y).sum().cpu().item()
+            n += y.shape[0]
+            batch_count += 1
+        test_acc = evaluate_accuracy(test_iter, net)
+        print('epoch %d, loss %.4f, train acc %.3f, test acc %.3f, time %.1f sec'
+              % (epoch + 1, train_l_sum / batch_count, train_acc_sum / n, test_acc, time.time() - start))
 
 
 def semilogy(x_vals, y_vals, x_label, y_label, x2_vals=None, y2_vals=None, legend=None, figsize=(3.5, 2.5)):
@@ -183,3 +257,18 @@ def semilogy(x_vals, y_vals, x_label, y_label, x2_vals=None, y2_vals=None, legen
     if x2_vals and y2_vals:
         plt.semilogy(x2_vals, y2_vals, linestyle=':')
         plt.legend(legend)
+
+
+def corr2d(X, K):
+    """
+    X是输入的特征映射，K是filter
+    """
+    h, w = K.shape
+    # 窄卷积（N - n + 1）
+    Y = torch.zeros((X.shape[0] - h + 1, X.shape[1] - w + 1))
+    for i in range(Y.shape[0]):
+        for j in range(Y.shape[0]):
+            Y[i, j] = (X[i: i + h, j: j + w] * K).sum()
+    return Y
+
+
