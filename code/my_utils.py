@@ -6,6 +6,8 @@ import torchvision
 from torch import nn, optim
 import torch.nn.functional as F
 import torchvision.transforms as transforms
+import random
+import zipfile
 
 
 def use_svg_display():
@@ -284,3 +286,136 @@ class GlobalAvgPool2d(nn.Module):
     def forward(self, x):
         # 将单个通道上（宽 * 高个元素的平均值计算出来）
         return F.avg_pool2d(x, kernel_size=x.size()[2:])
+
+
+def load_data_jay_lyrics():
+    with zipfile.ZipFile('../data/jaychou_lyrics.txt.zip') as zin:
+        with zin.open('jaychou_lyrics.txt') as f:
+            corpus_chars = f.read().decode('utf-8')
+    corpus_chars = corpus_chars.replace('\n', ' ').replace('\r', ' ')
+    corpus_chars = corpus_chars[0:10000]
+    
+    idx_to_char = list(set(corpus_chars))
+    char_to_idx = dict([(char, i) for i, char in enumerate(idx_to_char)])
+    vocab_size = len(char_to_idx)
+    corpus_indices = [char_to_idx[char] for char in corpus_chars]
+    
+    return corpus_indices, char_to_idx, idx_to_char, vocab_size
+
+
+def data_iter_random(corpus_indices, batch_size, num_steps, device=None):
+    # 一个example是一个包含了num_steps时间步的样本
+    # 减1是因为输出的索引x是相应输入的索引y加1
+    num_examples = (len(corpus_indices) - 1) // num_steps
+    # epcoh_size是batch的个数
+    batch_num = num_examples // batch_size
+    example_indices = list(range(num_examples))
+    random.shuffle(example_indices)      # 打乱每个样本的顺序（单个样本内仍然是按照原本序列的顺序排列的）
+    
+    def _data(pos):
+        return corpus_indices[pos: pos + num_steps]
+    
+    if device is None:
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    
+    for i in range(batch_num):
+        i = i * batch_size
+        batch_indices = example_indices[i: i + batch_size]
+        X = [_data(j * num_steps) for j in batch_indices]
+        Y = [_data(j * num_steps + 1) for j in batch_indices]
+        yield torch.tensor(X, dtype=torch.float32, device=device), torch.tensor(Y, dtype=torch.float32, device=device)
+
+
+def data_iter_consecutive(corpus_indices, batch_size, num_steps, device=None):
+    if device is None:
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    
+    corpus_indices = torch.tensor(corpus_indices, dtype=torch.float32, device=device)
+    data_len = len(corpus_indices)        # 给定序列中字符的个数
+    batch_len = data_len // batch_size
+    indices = corpus_indices[0: batch_size * batch_len].view(batch_size, batch_len)
+    batch_num = (batch_len - 1) // num_steps     # batch的个数
+    for i in range(batch_num):
+        i = i * num_steps
+        X = indices[:, i: i + num_steps]
+        Y = indices[:, i + 1: i + num_steps + 1]
+        yield X, Y
+
+
+def one_hot(x, n_class, dtype=torch.float32):
+    # input shape: (batch), output shape: (batch, n_class)
+    x = x.long()
+    res = torch.zeros(x.shape[0], n_class, dtype=dtype, device=x.device)
+    res.scatter_(1, x.view(-1, 1), 1)     # 将x作为索引，把1填充到res的dim=1的对应位置上
+    return res
+
+
+def to_onehot(X, n_class):
+    return [one_hot(X[:, i], n_class) for i in range(X.shape[1])]
+
+
+def grad_clipping(params, theta, device):
+    norm = torch.tensor([0.], device=device)
+    for param in params:
+        norm += (param.grad.data ** 2).sum()
+    norm = norm.sqrt().item()
+    if norm > theta:
+        for param in params:
+            param.grad.data *= theta / norm
+
+
+def rnn_train_and_predict(rnn, get_params, init_rnn_state, num_hiddens,
+                          vocab_size, device, corpus_indices, idx_to_char,
+                          char_to_idx, is_random_iter, num_epochs, num_steps,
+                          lr, clipping_theta, batch_size, pred_period,
+                          pred_len, prefixes):
+    if is_random_iter:
+        data_iter_fn = data_iter_random
+    else:
+        data_iter_fn = data_iter_consecutive
+    params = get_params()
+    loss = nn.CrossEntropyLoss()
+
+    for epoch in range(num_epochs):
+        if not is_random_iter:  # 如使用相邻采样，在epoch开始时初始化隐藏状态
+            state = init_rnn_state(batch_size, num_hiddens, device)
+        l_sum, n, start = 0.0, 0, time.time()
+        data_iter = data_iter_fn(corpus_indices, batch_size, num_steps, device)
+        for X, Y in data_iter:
+            if is_random_iter:  # 如使用随机采样，在每个小批量更新前初始化隐藏状态
+                state = init_rnn_state(batch_size, num_hiddens, device)
+            else:  
+            # 否则需要使用detach函数从计算图分离隐藏状态, 这是为了
+            # 使模型参数的梯度计算只依赖一次迭代读取的小批量序列(防止梯度计算开销太大)
+                for s in state:
+                    s.detach_()
+
+            inputs = to_onehot(X, vocab_size)
+            # outputs有num_steps个形状为(batch_size, vocab_size)的矩阵
+            (outputs, state) = rnn(inputs, state, params)
+            # 拼接之后形状为(num_steps * batch_size, vocab_size)
+            outputs = torch.cat(outputs, dim=0)
+            # Y的形状是(batch_size, num_steps)，转置后再变成长度为
+            # batch * num_steps 的向量，这样跟输出的行一一对应
+            y = torch.transpose(Y, 0, 1).contiguous().view(-1)
+            # 使用交叉熵损失计算平均分类误差
+            l = loss(outputs, y.long())
+
+            # 梯度清0
+            if params[0].grad is not None:
+                for param in params:
+                    param.grad.data.zero_()
+            l.backward()
+            grad_clipping(params, clipping_theta, device)  # 裁剪梯度
+            my_utils.mgd(params, lr, 1)  # 因为误差已经取过均值，梯度不用再做平均
+            l_sum += l.item() * y.shape[0]
+            n += y.shape[0]
+
+        if (epoch + 1) % pred_period == 0:
+            print('epoch %d, perplexity %f, time %.2f sec' % (
+                epoch + 1, math.exp(l_sum / n), time.time() - start))
+            for prefix in prefixes:
+                print(' -', rnn_predict(prefix, pred_len, rnn, params, init_rnn_state,
+                    num_hiddens, vocab_size, device, idx_to_char, char_to_idx))
+
+
