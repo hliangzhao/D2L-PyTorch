@@ -8,6 +8,7 @@ import torch.nn.functional as F
 import torchvision.transforms as transforms
 import random
 import zipfile
+import math
 
 
 def use_svg_display():
@@ -354,6 +355,20 @@ def to_onehot(X, n_class):
     return [one_hot(X[:, i], n_class) for i in range(X.shape[1])]
 
 
+def rnn_predict(prefix, num_chars, rnn, params, init_rnn_state, 
+                num_hiddens, vocab_size, device, idx_to_char, char_to_idx):
+    state = init_rnn_state(1, num_hiddens, device)
+    output = [char_to_idx[prefix[0]]]
+    for t in range(num_chars + len(prefix) - 1):
+        X = to_onehot(torch.tensor([[output[-1]]], device=device), vocab_size)
+        (Y, state) = rnn(X, state, params)
+        if t < len(prefix) - 1:
+            output.append(char_to_idx[prefix[t + 1]])
+        else:
+            output.append(int(Y[0].argmax(dim=1).item()))
+    return ''.join([idx_to_char[i] for i in output])
+
+
 def grad_clipping(params, theta, device):
     norm = torch.tensor([0.], device=device)
     for param in params:
@@ -407,7 +422,7 @@ def rnn_train_and_predict(rnn, get_params, init_rnn_state, num_hiddens,
                     param.grad.data.zero_()
             l.backward()
             grad_clipping(params, clipping_theta, device)  # 裁剪梯度
-            my_utils.mgd(params, lr, 1)  # 因为误差已经取过均值，梯度不用再做平均
+            mgd(params, lr, 1)  # 因为误差已经取过均值，梯度不用再做平均
             l_sum += l.item() * y.shape[0]
             n += y.shape[0]
 
@@ -419,3 +434,83 @@ def rnn_train_and_predict(rnn, get_params, init_rnn_state, num_hiddens,
                     num_hiddens, vocab_size, device, idx_to_char, char_to_idx))
 
 
+class RNNModel(nn.Module):
+    def __init__(self, rnn_layer, vocab_size):
+        super(RNNModel, self).__init__()
+        self.rnn = rnn_layer
+        self.hidden_size = rnn_layer.hidden_size * (2 if rnn_layer.bidirectional else 1)
+        self.vocab_size = vocab_size
+        self.dense = nn.Linear(self.hidden_size, vocab_size)
+        self.state = None
+    
+    def forward(self, inputs, state):
+        # input is of size (batch_size, num_steps)
+        X = to_onehot(inputs, self.vocab_size)
+        Y, self.state = self.rnn(torch.stack(X), state)
+        # change size into (num_steps * batch_size, num_hiddens)
+        output = self.dense(Y.view(-1, Y.shape[-1]))
+        return output, self.state
+
+
+def rnn_predict_torch(prefix, num_chars, model, vocab_size, device, idx_to_char, char_to_idx):
+    state = None
+    output = [char_to_idx[prefix[0]]]
+    for t in range(num_chars + len(prefix) - 1):
+        X = torch.tensor([output[-1]], device=device).view(1, 1)
+        if state is not None:
+            if isinstance(state, tuple):     # LSTM, state:(h, c)  
+                state = (state[0].to(device), state[1].to(device))
+            else:
+                state = state.to(device)
+        
+        (Y, state) = model(X, state)
+        if t < len(prefix) - 1:
+            output.append(char_to_idx[prefix[t + 1]])
+        else:
+            output.append(int(Y.argmax(dim=1).item()))
+    return ''.join([idx_to_char[i] for i in output])
+
+
+def rnn_train_and_predict_torch(model, num_hiddens, vocab_size, device, 
+                                corpus_indices, idx_to_char, char_to_idx, 
+                                num_epochs, num_steps, lr, clipping_theta, 
+                                batch_size, pred_period, pred_len, prefixes):
+    loss = nn.CrossEntropyLoss()
+    optimizer = optim.Adam(model.parameters(), lr=lr)
+    model.to(device)
+    state = None
+    for epoch in range(num_epochs):
+        l_sum, n, start = 0., 0, time.time()
+        data_iter = data_iter_consecutive(corpus_indices, batch_size, num_steps, device)
+        for X, Y in data_iter:
+            if state is not None:
+                if isinstance(state, tuple):
+                    state = (state[0].detach(), state[1].detach())
+                else:
+                    state = state.detach()
+            
+            (output, state) = model(X, state)      # output: 形状为(num_steps * batch_size, vocab_size)
+            # Y的形状是(batch_size, num_steps)，转置后再变成长度为
+            # batch * num_steps 的向量，这样跟输出的行一一对应
+            y = torch.transpose(Y, 0, 1).contiguous().view(-1)
+            l = loss(output, y.long())
+            
+            optimizer.zero_grad()
+            l.backward()
+            grad_clipping(model.parameters(), clipping_theta, device)
+            optimizer.step()
+            l_sum += l.item() * y.shape[0]
+            n += y.shape[0]
+        
+        try:
+            perplexity = math.exp(l_sum / n)
+        except OverflowError:
+            perplexity = float('inf')
+        
+        if (epoch + 1) % pred_period == 0:
+            print('epoch %d, perplexity %f, time %.2f sec' % (
+                epoch + 1, perplexity, time.time() - start))
+            for prefix in prefixes:
+                print(' -', rnn_predict_torch(
+                    prefix, pred_len, model, vocab_size, device, idx_to_char,
+                    char_to_idx))
