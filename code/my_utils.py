@@ -620,3 +620,21 @@ def opt_train_torch(optimizer_fn, optimizer_hyperparams, features, labels, batch
     plt.plot(np.linspace(0, num_epochs, len(ls)), ls)
     plt.xlabel('epoch')
     plt.ylabel('loss')
+    return
+
+
+def get_tokenized(data):
+    """
+    Each data is of shape [string, label]
+    """
+    def tokenizer(text):
+        return [tk.lower() for tk in text.split(' ')]
+    return [tokenizer(review) for review, _ in data]
+
+
+def get_vocab_imbd(data):
+    tokenized_data = get_tokenized(data)
+    counter = collections.Counter([tk for st in tokenized_data for tk in st])
+    return Vocab.Vocab(counter, min_freq=5)
+
+

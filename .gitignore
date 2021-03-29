@@ -2,3 +2,6 @@
 code/__pycache__/
 htmls_
 .DS_Store
+data/pretrained_glove
+data/aclImdb
+data/aclImdb_v1.tar.gz
